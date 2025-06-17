@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 import os
-from typing import List
+from typing import List, Dict, Optional
+import requests
 
 # Add Google Drive API imports
 from googleapiclient.discovery import build
@@ -12,15 +13,61 @@ class DataSource(ABC):
     @abstractmethod
     def fetch(self):
         """Fetch data from the source."""
-        pass
+        pass 
 
 class GithubFetcher(DataSource):
-    def __init__(self, credentials):
-        self.credentials = credentials
+    """
+    Fetches files from a GitHub repository. Easily configurable for different repos, branches, paths, and file types.
+    """
+    def __init__(self, credentials: dict, repo: str, branch: str = "main", path: str = "", extensions: Optional[List[str]] = None):
+        """
+        credentials: dict with 'token' key for GitHub personal access token
+        repo: 'owner/repo' string
+        branch: branch name (default 'main')
+        path: subdirectory in the repo (default root)
+        extensions: list of file extensions to include (e.g., ['.md', '.py'])
+        """
+        self.token = credentials.get("token")
+        self.repo = repo
+        self.branch = branch
+        self.path = path
+        self.extensions = extensions or []
 
-    def fetch(self):
-        # TODO: Implement GitHub data fetching
-        pass
+    def fetch(self) -> List[Dict]:
+        """Fetch all files matching the filter from the repo, recursively."""
+        headers = {"Authorization": f"token {self.token}"} if self.token else {}
+        return list(self._walk_and_fetch(self.path, headers))
+
+    def _walk_and_fetch(self, path: str, headers: dict):
+        for item in self._list_dir(path, headers):
+            if item["type"] == "file" and self._should_include(item["name"]):
+                yield self._fetch_file(item, headers)
+            elif item["type"] == "dir":
+                yield from self._walk_and_fetch(item["path"], headers)
+
+    def _list_dir(self, path: str, headers: dict) -> List[Dict]:
+        url = f"https://api.github.com/repos/{self.repo}/contents/{path}?ref={self.branch}"
+        resp = requests.get(url, headers=headers)
+        if resp.status_code != 200:
+            print(f"GitHub API error: {resp.status_code} {resp.text}")
+            return []
+        return resp.json()
+
+    def _should_include(self, filename: str) -> bool:
+        return not self.extensions or any(filename.endswith(ext) for ext in self.extensions)
+
+    def _fetch_file(self, file_info: Dict, headers: dict) -> Dict:
+        resp = requests.get(file_info["download_url"], headers=headers)
+        if resp.status_code != 200:
+            print(f"Failed to fetch {file_info['download_url']}: {resp.status_code}")
+            return {}
+        return {
+            "name": file_info["name"],
+            "path": file_info["path"],
+            "content": resp.text,
+            "sha": file_info["sha"],
+            "download_url": file_info["download_url"]
+        }
 
 class GoogleDriveFetcher(DataSource):
     def __init__(self, credentials_json: str, folder_id: str):
@@ -80,7 +127,7 @@ def get_data_sources(config):
     sources = []
     for src in config["sources"]:
         if src["type"] == "github":
-            sources.append(GithubFetcher(src["credentials"]))
+            sources.append(GithubFetcher(src["credentials"], src["repo"], src["branch"], src["path"], src["extensions"]))
         elif src["type"] == "gdrive":
             sources.append(GoogleDriveFetcher(src["credentials_json"], src["folder_id"]))
         # Add more elifs for new sources
